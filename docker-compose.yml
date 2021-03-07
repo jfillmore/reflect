@@ -1,0 +1,11 @@
+version: '2'
+
+services:
+  php-app:
+    build: .
+    image: php-app
+    container_name: php-app
+    volumes:
+      - .:/opt/php/reflect
+    ports:
+      - "8123:8123"
