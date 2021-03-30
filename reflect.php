@@ -83,18 +83,24 @@ class HttpReflect {
     public function sendSessionHeaders() {
         global $SESSION_STATUS;
         // e.g. a "slug", optionally preceeded with +- to customize behavior
-        $sessionId = getHeader('x-refl-session', 'default');
+        $defSessionId = 'default';
+        $sessionId = getHeader('x-refl-session', $defSessionId);
         // assume new session by default
-        if (!preg_match('/^\w/', $sessionId)) {
+        if (preg_match('/^\w/', $sessionId)) {
+            $keyOp = '+';
+        } else {
             $keyOp = substr($sessionId, 0, 1);
             $sessionId = substr($sessionId, 1);
-        } else {
-            $keyOp = '+';
+            if (!$sessionId) {
+                $sessionId = $defSessionId;
+            }
         }
         session_name('session');
         session_id($sessionId);
         session_start();
 
+        $this->meta['session'] = 'continue';
+        $this->meta['session_op'] = $keyOp;
         if ($keyOp == '-') {
             $sessionStatus = session_status();
             if (isset($_SESSION['id'])) {
@@ -155,6 +161,22 @@ class HttpReflect {
             if (!empty($val)) {
                 $resp[$key] = $val;
             }
+        }
+        $padding = getHeader('x-refl-padding');
+        if (!empty($padding)) {
+            $units =  ['B', 'K', 'M'];
+            $unit = substr($padding, -1);
+            if (is_numeric($unit)) {
+                $scale = 1;
+            } else {
+                $unit = strtoupper($unit);
+                if (!in_array($unit, $units)) {
+                    throw new Exception("Unrecognized unit: $unit; try $units");
+                }
+                $padding = substr($padding, 0, strlen($padding) - 1);
+                $scale = 1000 ** array_search($unit, $units);
+            }
+            $resp['padding'] = str_repeat('.', $padding * $scale);
         }
         $resp['request'] = [
             'src_addr' => $_SERVER['REMOTE_ADDR'],
