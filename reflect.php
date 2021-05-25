@@ -1,39 +1,8 @@
 <?php
 
-//  ____________________                               ____________________  
-//  \*/-\*/-\*/-\*/-\*/-\  DO NOT EXPOSE EXTERNALLY!  /.\*/-\*/-\*/-\*/-\*/ 
+//  ____________________                               ____________________
+//  \*/-\*/-\*/-\*/-\*/-\  DO NOT EXPOSE EXTERNALLY!  /.\*/-\*/-\*/-\*/-\*/
 //   ~~~~~~~~~~~~~~~~~~~~                             ~~~~~~~~~~~~~~~~~~~~
-
-
-/*
-
-# Request Headers:
-
-The caller can customize the response we get back to test specific behaviors:
-
-- X-Refl-Status: str = Set a custom response status code.
-- X-Refl-Session: str = Set session to a specific key; default="default"
-- X-Refl-Delay: float = Extra delay on response in number of seconds
-- X-Refl-Padding: unit = Pad the response with extra data (e.g. 1, 1B, 3K, 10M)
-- X-Refl-Stream: unit = Stream the response in chunks of the given size
-- X-Refl-Stream-Delay: float = Delay between stream chunks in seconds
-- X-Refl-Body: 0|1 = Copy the response body/content-type from the request
-- X-Refl-Proxy: str = Proxy back response from another URL
-
-Units are specified either in number of bytes or as a string ending in a suffix
-of "B", "K', or "M" bytes, kilobytes, and megabytes.
-
-
-# Response Data
-
-Returns a JSON response using "text/plain" unless JSON is requested via the
-"Accept" header.
-
-Returns request and session description information as well as extra "meta"
-data based on any runtime behaviors invoked.
-
-
-*/
 
 
 // spill our guts to the world if something isn't right; this isn't a prod service!
