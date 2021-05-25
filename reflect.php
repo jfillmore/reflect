@@ -1,10 +1,66 @@
 <?php
 
-// spill our guts to the world if something isn't right
+//  ____________________                               ____________________  
+//  \*/-\*/-\*/-\*/-\*/-\  DO NOT EXPOSE EXTERNALLY!  /.\*/-\*/-\*/-\*/-\*/ 
+//   ~~~~~~~~~~~~~~~~~~~~                             ~~~~~~~~~~~~~~~~~~~~
+
+
+/*
+
+# Request Headers:
+
+The caller can customize the response we get back to test specific behaviors:
+
+- X-Refl-Status: str = Set a custom response status code.
+- X-Refl-Session: str = Set session to a specific key; default="default"
+- X-Refl-Delay: float = Extra delay on response in number of seconds
+- X-Refl-Padding: unit = Pad the response with extra data (e.g. 1, 1B, 3K, 10M)
+- X-Refl-Stream: unit = Stream the response in chunks of the given size
+- X-Refl-Stream-Delay: float = Delay between stream chunks in seconds
+- X-Refl-Body: 0|1 = Copy the response body/content-type from the request
+- X-Refl-Proxy: str = Proxy back response from another URL
+
+Units are specified either in number of bytes or as a string ending in a suffix
+of "B", "K', or "M" bytes, kilobytes, and megabytes.
+
+
+# Response Data
+
+Returns a JSON response using "text/plain" unless JSON is requested via the
+"Accept" header.
+
+Returns request and session description information as well as extra "meta"
+data based on any runtime behaviors invoked.
+
+
+*/
+
+
+// spill our guts to the world if something isn't right; this isn't a prod service!
 ini_set('display_errors', 1);
 ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
 xdebug_disable();  // too much noise by default
+// ensure we have fine-tune control over responses
+ob_implicit_flush(true);
+
+
+// == HELPERS ==================================================================
+
+function fail($ex, $spillage = null) {
+    $resp = array(
+        'success' => false,
+        'error' => $ex->getMessage()
+    );
+    if ($spillage !== null) {
+        $resp['spillage'] = $spillage;
+    }
+    $resp['data'] = array(
+        'backtrace' => cleanTrace($ex->getTrace())
+    );
+    echo json_encode($resp, JSON_PRETTY_PRINT);
+    exit(1);
+}
 
 
 function getHeader($name, $default = null) {
@@ -46,28 +102,32 @@ function cleanTrace($stackTrace) {
     return $stack;
 }
 
-function fail($ex, $spillage = null) {
-    $resp = array(
-        'success' => false,
-        'error' => $ex->getMessage()
-    );
-    if ($spillage !== null) {
-        $resp['spillage'] = $spillage;
+function parseUnit($val) {
+    $units =  ['B', 'K', 'M'];
+    $unit = substr($val, -1);
+    if (is_numeric($unit)) {
+        $scale = 1;
+    } else {
+        $unit = strtoupper($unit);
+        if (!in_array($unit, $units)) {
+            throw new Exception("Unrecognized unit: $unit; try $units");
+        }
+        $val = intval(substr($val, 0, strlen($val) - 1));
+        $scale = 1000 ** array_search($unit, $units);
     }
-    $resp['data'] = array(
-        'backtrace' => cleanTrace($ex->getTrace())
-    );
-    echo json_encode($resp, JSON_PRETTY_PRINT);
-    exit(1);
+
+    return [$val, $scale];
 }
 
 
+// == APP LOGIC ================================================================
+
 class HttpReflect {
-    private $body = null;
-    private $meta = [];
+    public $request_body = null;
+    public $meta = [];
 
     public function __construct() {
-        $this->body = stream_get_contents(fopen('php://input', 'r'));
+        $this->request_body = stream_get_contents(fopen('php://input', 'r'));
         // TODO: use sorted copies
         ksort($_ENV);
         ksort($_GET);
@@ -154,7 +214,7 @@ class HttpReflect {
             'meta' => $this->meta,
             'session' => $_SESSION,
             'headers' => $this->getRequestHeaders(),
-            'body' => $this->body
+            'body' => $this->request_body
         ];
         $resp = [];
         foreach ($defaultData as $key => $val) {
@@ -164,65 +224,105 @@ class HttpReflect {
         }
         $padding = getHeader('x-refl-padding');
         if (!empty($padding)) {
-            $units =  ['B', 'K', 'M'];
-            $unit = substr($padding, -1);
-            if (is_numeric($unit)) {
-                $scale = 1;
-            } else {
-                $unit = strtoupper($unit);
-                if (!in_array($unit, $units)) {
-                    throw new Exception("Unrecognized unit: $unit; try $units");
-                }
-                $padding = substr($padding, 0, strlen($padding) - 1);
-                $scale = 1000 ** array_search($unit, $units);
-            }
-            $resp['padding'] = str_repeat('.', $padding * $scale);
+            $unit = parseUnit($padding);
+            $resp['padding'] = str_repeat('.', $unit[0] * $unit[1]);
         }
         $resp['request'] = [
-            'src_addr' => $_SERVER['REMOTE_ADDR'],
-            'src_port' => $_SERVER['REMOTE_PORT'],
-            'method' => $_SERVER['REQUEST_METHOD'],
-            'url' => "http://" . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI'],
+            'src_addr' => @$_SERVER['REMOTE_ADDR'],
+            'src_port' => @$_SERVER['REMOTE_PORT'],
+            'method' => @$_SERVER['REQUEST_METHOD'],
+            'url' => "http://" . @$_SERVER['HTTP_HOST'] . @$_SERVER['REQUEST_URI'],
             'duration_sec' => floatval(preg_replace(
                 '/^(\d+\.[0]+[^0]).*/',
                 '\1',
                 microtime(true) - $startTime,
-            ))
+            )),
         ];
         return $resp;
     }
 }
 
 
-// == HEADERS =================================================================
-if ($_SERVER['HTTP_ACCEPT'] == 'application/json') {
-    header('Content-Type: application/json');
-} else {
-    header('Content-Type: text/plain');
-}
-ob_start();
+// == HEADERS + MAGIC ==========================================================
 
+$reflectBody = intval(getHeader('x-refl-body', 0)) == 1;
+$reflectUrl = getHeader('x-refl-proxy');
 
-// == EXTRA HEADERS + BODY ====================================================
 $error = null;
-$startTime = microtime(true);
+$response  = null;
+
 try {
+    if ($reflectBody && $reflectUrl) {
+        throw new Exception("Cannot use x-refl-body and x-refl-proxy together.");
+    }
+
+    $startTime = microtime(true);
     $ref = new HttpReflect();
     http_response_code($ref->getStatusCode(200));
     $ref->sendSessionHeaders();
     $ref->processRequest();
-    $response = $ref->getReflection($startTime);
+    $contentType = 'text/plain';
+    if ($reflectBody) {
+        $contentType = @$_SERVER['HTTP_CONTENT_TYPE'];
+        $response = $ref->request_body;
+    } else if ($reflectUrl) {
+        // so much hackz :-(
+        $urlRes = fopen($reflectUrl, 'r');
+        $urlMeta = stream_get_meta_data($urlRes)['wrapper_data'];
+        $response = stream_get_contents($urlRes);
+        foreach ($urlMeta as $header) {
+            if (substr(strtolower($header), 0, 13) == 'content-type:') {
+                $contentType = trim(substr($header, 13));
+                break;
+            }
+        }
+
+    } else {
+        if (@$_SERVER['HTTP_ACCEPT'] == 'application/json') {
+            $contentType = 'application/json';
+        }
+        $response = json_encode(
+            $ref->getReflection($startTime),
+            JSON_PRETTY_PRINT
+        );
+    }
+    header("Content-Type: $contentType");
+
 } catch (Exception $e) {
     $error = $e;
 }
 
-$spillage = ob_get_contents();
-ob_end_clean();
-if ($spillage || $error) {
-    if (!$error) {
-        $error = new Exception('API Spillage');
+
+// == RESPONSE BODY ============================================================
+
+$out = fopen('php://output', 'w');
+
+$stream = getHeader('x-refl-stream');
+if (empty($stream)) {
+    header('Content-Length: ' . strlen($response));
+    fwrite($out, $response);
+} else {
+    $delaySecs = floatval(getHeader('x-refl-stream-delay', 0));
+    $unit = parseUnit($stream);
+    $chunkSize = $unit[0] * $unit[1];
+    if ($chunkSize < 1) {
+        throw new Exception("Invalid chunk size: $chunkSize.");
     }
-    fail($error, $spillage);
+    header('Transfer-Encoding: chunked');
+    $offset = 0;
+    $eol = "\r\n";
+    while ($offset < strlen($response)) {
+        $chunk = substr($response, $offset, $chunkSize);
+        fwrite($out, dechex(strlen($chunk)) . $eol);
+        fwrite($out, $chunk . $eol);
+        fflush($out);
+        if ($delaySecs) {
+            usleep(intval($delaySecs * 1000000));
+        }
+        $offset += $chunkSize;
+    }
+    fwrite($out, "0$eol$eol");
+    fflush($out);
 }
 
-echo json_encode($response, JSON_PRETTY_PRINT);
+fclose($out);
