@@ -3,6 +3,8 @@
 // spill our guts to the world if something isn't right
 ini_set('display_errors', 1);
 ini_set('display_startup_errors', 1);
+// allow caller to customize the response content type
+ini_set('default_charset', '');
 error_reporting(E_ALL);
 xdebug_disable();  // too much noise by default
 
@@ -76,6 +78,19 @@ class HttpReflect {
         ksort($_SERVER);
     }
 
+    private function decodedBody() {
+        $contentType = getHeader('content-type', '');
+        $ctJson = 'application/json';
+        $ctForm = 'application/x-www-form-urlencoded';
+        if (substr($contentType, 0, strlen($ctJson)) == $ctJson) {
+            return json_decode($this->body);
+        }
+        if (substr($contentType, 0, strlen($ctForm)) == $ctForm) {
+            return urldecode($this->body);
+        }
+        return null;
+    }
+
     public function getStatusCode($default) {
         return getHeader('x-refl-status', $default);
     }
@@ -141,8 +156,8 @@ class HttpReflect {
     public function processRequest() {
         // misc schenanigans
         $delaySecs = floatval(getHeader('x-refl-delay', 0));
+        $this->meta['delay'] = $delaySecs;
         if ($delaySecs > 0) {
-            $this->meta['delay'] = $delaySecs;
             usleep(intval($delaySecs * 1000000));
         }
     }
@@ -154,7 +169,10 @@ class HttpReflect {
             'meta' => $this->meta,
             'session' => $_SESSION,
             'headers' => $this->getRequestHeaders(),
-            'body' => $this->body
+            'body' => [
+                'raw' => $this->body,
+                'decoded' => $this->decodedBody(),
+            ],
         ];
         $resp = [];
         foreach ($defaultData as $key => $val) {
@@ -195,10 +213,15 @@ class HttpReflect {
 
 
 // == HEADERS =================================================================
+$encoding = getHeader('x-refl-charset', 'UTF-8');
+$charset = '';
+if ($encoding) {
+    $charset = ";charset=$encoding";
+}
 if ($_SERVER['HTTP_ACCEPT'] == 'application/json') {
-    header('Content-Type: application/json');
+    header("Content-Type: application/json$charset");
 } else {
-    header('Content-Type: text/plain');
+    header("Content-Type: text/plain$charset");
 }
 ob_start();
 
